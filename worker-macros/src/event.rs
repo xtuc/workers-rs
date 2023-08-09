@@ -64,20 +64,29 @@ pub fn expand_macro(attr: TokenStream, item: TokenStream) -> TokenStream {
             // create a new "main" function that takes the worker_sys::Request, and calls the
             // original attributed function, passing in a converted worker::Request
             let wrapper_fn = quote! {
-                pub async fn #wrapper_fn_ident(
+                pub fn #wrapper_fn_ident(
                     req: ::worker::worker_sys::web_sys::Request,
                     env: ::worker::Env,
                     ctx: ::worker::worker_sys::Context
-                ) -> ::worker::worker_sys::web_sys::Response {
+                ) -> ::worker::js_sys::Promise {
+                    let abort_controller = Box::new(::worker::AbortController::default());
+
                     let ctx = worker::Context::new(ctx);
-                    // get the worker::Result<worker::Response> by calling the original fn
-                    match #input_fn_ident(::worker::Request::from(req), env, ctx).await.map(::worker::worker_sys::web_sys::Response::from) {
-                        Ok(res) => res,
-                        Err(e) => {
-                            ::worker::console_error!("{}", &e);
-                            #error_handling
+
+                    let p = ::worker::wasm_bindgen_futures::future_to_promise(async move {
+                        // get the worker::Result<worker::Response> by calling the original fn
+                        match #input_fn_ident(::worker::Request::from(req), env, ctx).await.map(::worker::worker_sys::web_sys::Response::from) {
+                            Ok(res) => Ok(res.into()),
+                            Err(e) => {
+                                ::worker::console_error!("{}", &e);
+                                #error_handling
+                            }
                         }
-                    }
+                    });
+
+                    let p = ::cancel_promise::make(abort_controller.signal(), p);
+                    CONTROLLER.set(abort_controller).unwrap();
+                    p
                 }
             };
             let wasm_bindgen_code =
@@ -87,9 +96,20 @@ pub fn expand_macro(attr: TokenStream, item: TokenStream) -> TokenStream {
             let output = quote! {
                 #input_fn
 
+                use once_cell::sync::OnceCell;
+                static CONTROLLER: OnceCell<Box<worker::AbortController>> = OnceCell::new();
+
+                // why can't call from the rewriting?
+                #[no_mangle]
+                pub extern "C" fn __workers_rs_cancel() {
+                    let controller = CONTROLLER.get().unwrap();
+                    controller.abort();
+                }
+
                 mod _worker_fetch {
                     use ::worker::{wasm_bindgen, wasm_bindgen_futures};
                     use super::#input_fn_ident;
+                    use super::CONTROLLER;
                     #wasm_bindgen_code
                 }
             };

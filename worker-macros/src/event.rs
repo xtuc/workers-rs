@@ -53,7 +53,9 @@ pub fn expand_macro(attr: TokenStream, item: TokenStream) -> TokenStream {
             let error_handling = match respond_with_errors {
                 true => {
                     quote! {
-                        ::worker::Response::error(e.to_string(), 500).unwrap().into()
+                        Ok(::worker::worker_sys::web_sys::Response::from(
+                            ::worker::Response::error(e.to_string(), 500).unwrap()
+                        ).into())
                     }
                 }
                 false => {
@@ -64,20 +66,48 @@ pub fn expand_macro(attr: TokenStream, item: TokenStream) -> TokenStream {
             // create a new "main" function that takes the worker_sys::Request, and calls the
             // original attributed function, passing in a converted worker::Request
             let wrapper_fn = quote! {
-                pub async fn #wrapper_fn_ident(
+                pub fn #wrapper_fn_ident(
                     req: ::worker::worker_sys::web_sys::Request,
                     env: ::worker::Env,
                     ctx: ::worker::worker_sys::Context
-                ) -> ::worker::worker_sys::web_sys::Response {
+                ) -> ::worker::js_sys::Promise {
                     let ctx = worker::Context::new(ctx);
-                    // get the worker::Result<worker::Response> by calling the original fn
-                    match #input_fn_ident(::worker::Request::from(req), env, ctx).await.map(::worker::worker_sys::web_sys::Response::from) {
-                        Ok(res) => res,
-                        Err(e) => {
-                            ::worker::console_error!("{}", &e);
-                            #error_handling
+
+                    let promise = ::worker::wasm_bindgen_futures::future_to_promise(async move {
+                        // get the worker::Result<worker::Response> by calling the original fn
+                        match #input_fn_ident(::worker::Request::from(req), env, ctx).await.map(::worker::worker_sys::web_sys::Response::from) {
+                            Ok(res) => Ok(res.into()),
+                            Err(e) => {
+                                ::worker::console_error!("{}", &e);
+                                #error_handling
+                            }
                         }
-                    }
+                    });
+
+                    // Wrap the user promise into our cancellable promise
+                    // with an AbortController.
+                    let abort_controller = Box::new(::worker::AbortController::default());
+                    let promise = ::worker::cancellable_promise::make(abort_controller.signal(), promise);
+
+                    // Save the AbortController.
+                    *ABORT_CONTROLLER.lock().unwrap() = Some(abort_controller);
+
+                    // Remove the AbortController once the Promise terminates.
+                    let promise = {
+                        let clean_abort_controller = ::worker::wasm_bindgen::closure::Closure::new(move || {
+                            if let Ok(mut abort_controller) = ABORT_CONTROLLER.lock() {
+                                *abort_controller = None;
+                            }
+                        });
+                        // prevent the closure of being dropped before JS tries
+                        // to call it.
+                        let promise = promise.finally(&clean_abort_controller);
+                        clean_abort_controller.forget();
+
+                        promise
+                    };
+
+                    promise
                 }
             };
             let wasm_bindgen_code =
@@ -87,9 +117,38 @@ pub fn expand_macro(attr: TokenStream, item: TokenStream) -> TokenStream {
             let output = quote! {
                 #input_fn
 
+                use std::sync::Mutex;
+                ::worker::lazy_static::lazy_static! {
+                    // Keep the last request's AbortController, allowing the
+                    // request to be aborted later if the code panics.
+                    // Panics here cause the worker to hang,
+                    // see https://github.com/rustwasm/wasm-bindgen/issues/2724.
+                    //
+                    // Only keeping the last request's AbortController may lead
+                    // to some requests hanging, but it requires a lot of traffic
+                    // that cause a panic.
+                    //
+                    // Note that while the worker is able to concurrently process
+                    // request, we only keep the latest request's AbortController.
+                    // This is to avoid cancelling a request from another request's
+                    // context which leads to the error
+                    // `Error: Cannot perform I/O on behalf of a different request...`.
+                    static ref ABORT_CONTROLLER: Mutex<Option<Box<worker::AbortController>>> = Mutex::new(None);
+                }
+
+                #[no_mangle]
+                pub extern "C" fn __workers_rs_cancel() {
+                    if let Ok(controller) = ABORT_CONTROLLER.lock() {
+                        if let Some(controller) = controller.as_ref() {
+                            controller.abort();
+                        }
+                    }
+                }
+
                 mod _worker_fetch {
                     use ::worker::{wasm_bindgen, wasm_bindgen_futures};
                     use super::#input_fn_ident;
+                    use super::ABORT_CONTROLLER;
                     #wasm_bindgen_code
                 }
             };

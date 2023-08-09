@@ -32,6 +32,8 @@ wasm-streams = "0.3.0"
 worker-kv = "0.6.0"
 worker-macros = { path = "../worker-macros", version = "0.0.10" }
 worker-sys = { path = "../worker-sys", version = "0.0.10" }
+lazy_static = "1.4.0"
+console_error_panic_hook = "0.1.7"
 
 [dependencies.web-sys]
 version = "0.3.63"

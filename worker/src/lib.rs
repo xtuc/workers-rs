@@ -7,7 +7,11 @@ use std::result::Result as StdResult;
 #[doc(hidden)]
 pub use async_trait;
 #[doc(hidden)]
+pub use console_error_panic_hook;
+#[doc(hidden)]
 pub use js_sys;
+#[doc(hidden)]
+pub use lazy_static;
 pub use url::Url;
 #[doc(hidden)]
 pub use wasm_bindgen;
@@ -56,6 +60,8 @@ mod cf;
 mod context;
 mod cors;
 // Require pub module for macro export
+#[doc(hidden)]
+pub mod cancellable_promise;
 #[cfg(feature = "d1")]
 pub mod d1;
 mod date;

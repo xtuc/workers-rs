@@ -16,7 +16,7 @@ impl AbortController {
     }
 
     /// Aborts any operation using a [AbortSignal] created from this controller.
-    pub fn abort(self) {
+    pub fn abort(&self) {
         self.inner.abort()
     }
 
@@ -78,3 +78,6 @@ impl Deref for AbortSignal {
         &self.inner
     }
 }
+
+unsafe impl Sync for AbortController {}
+unsafe impl Send for AbortController {}
